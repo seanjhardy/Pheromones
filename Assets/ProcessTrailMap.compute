@@ -1,0 +1,129 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel ProcessTrailMap
+#pragma kernel Update
+#pragma kernel DrawBlack
+
+struct Agent{
+    float2 position;
+    float angle;
+    uint species;
+};
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWStructuredBuffer<Agent> agents;
+RWTexture2D<float4> map;
+RWTexture2D<float4> nextMap;
+
+int numAgents;
+int width;
+int height;
+
+float random (float2 st) {
+    return frac(sin(dot(st.xy, float2(12.9898,78.233)))*43758.5453123);
+}
+
+float sense(Agent agent, float sensorAngleOffset){
+    float sensorAngle = agent.angle + sensorAngleOffset;
+    float2 sensorDir = float2(cos(sensorAngle), sin(sensorAngle));
+    float senseDst = 10.0;
+    int2 sensorCentre = agent.position + sensorDir * senseDst;
+    float sum = 0;
+    int sensorSize = 5;
+
+    for(int offsetX = -sensorSize; offsetX <= sensorSize; offsetX ++){
+        for(int offsetY = -sensorSize; offsetY <= sensorSize; offsetY ++){
+            int2 pos = sensorCentre + int2(offsetX, offsetY);
+
+            if(pos.x >= 0 && pos.x < width &&
+               pos.y >= 0 && pos.y < height){
+                sum += map[pos].x;
+            }
+        }
+    }
+    return sum;
+}
+
+[numthreads(8,8,1)]
+void DrawBlack (uint3 id : SV_DispatchThreadID){
+    map[id.xy] = float4(0, 0, 0, 1.0);
+}
+
+[numthreads(256,1,1)]
+void Update (uint3 id : SV_DispatchThreadID){
+    if(id.x >= numAgents){
+        return;
+    }
+    Agent agent = agents[id.x];
+
+    //Move agent based on direction and speed
+    float2 direction = float2(cos(agent.angle), sin(agent.angle));
+    float2 newPos = agent.position + direction;
+
+    if(newPos.x < 2 || newPos.x > width - 2 || newPos.y < 2 || newPos.y > height - 2){
+        newPos.x = min(width - 10, max(10, newPos.x));
+        newPos.y = min(height - 10, max(10, newPos.y));
+        agent.angle = random(newPos) * 6.28318530718f;
+    }
+    //attraction to pheromones
+    float weightForward = sense(agent, 0);
+    float weightLeft = sense(agent, 0.3);
+    float weightRight = sense(agent, -0.3);
+
+    float randomSteerStrength = random(newPos + direction * 7.33f);
+    float turnSpeed = 0.3;
+    //turn forward
+    if(weightForward > weightLeft && weightForward > weightRight){
+        agent.angle += 0;
+    }
+    //turn randomly
+    //if(weightForward < (weightLeft + weightRight) * 0.4){
+        agent.angle += (randomSteerStrength - 0.5) * 2 * turnSpeed;
+    //}
+    //turn right
+    if(weightRight > weightLeft){
+        agent.angle -= randomSteerStrength * turnSpeed;
+    }
+    //turn left
+    if(weightLeft > weightRight){
+        agent.angle += randomSteerStrength * turnSpeed;
+    }
+
+    agent.position = newPos;
+    agents[id.x] = agent;
+    map[int2(newPos.x, newPos.y)] = float4(138.0/255, 255.0/255, 115.0/255, 1.0);
+}
+
+
+[numthreads(16,16,1)]
+void ProcessTrailMap (uint3 id  : SV_DispatchThreadID){
+    if(id.x < 0 || id.x >= width || id.y < 0 || id.y >= height){
+        return;
+    }
+
+    float4 originalValue = map[id.xy];
+    float4 sum = 0;
+    for(int offsetX = -1; offsetX <= 1; offsetX ++){
+        for(int offsetY = -1; offsetY <= 1; offsetY ++){
+            int sampleX = id.x + offsetX;
+            int sampleY = id.y + offsetY;
+            if(sampleX >= 0 && sampleX < width &&
+               sampleY >= 0 && sampleY < height){
+                sum += map[int2(sampleX, sampleY)];
+            }else{
+                sum += float4(0.0, 0.0, 0.0, 1.0);
+            }
+        }
+    }
+
+    float diffuseSpeed = 0.25f;
+    float evaporateSpeed = 0.005f;
+
+    float4 blurResult = sum/9;
+    float4 diffusedValue = lerp(originalValue, blurResult, diffuseSpeed);
+
+    float4 diffusedAndEvaporatedValue = max(0, diffusedValue - evaporateSpeed);
+    diffusedAndEvaporatedValue.w = 1.0;
+    nextMap[id.xy] = diffusedAndEvaporatedValue;
+}
+
